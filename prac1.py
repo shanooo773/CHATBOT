@@ -8,7 +8,9 @@ from langchain.chains import RetrievalQA
 from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEndpoint, HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS as TempFAISS
+from langchain.text_splitter import CharacterTextSplitter
 # Enhanced Styling – With Color Tweaks and UI Polish
 st.markdown("""
     <style>
@@ -290,7 +292,7 @@ section[data-testid="stSidebar"] input[type="radio"]:checked + label {
 
 # Load environment variables
 load_dotenv(find_dotenv())
-HF_TOKEN = os.getenv("HF_TOKEN")  
+HF_TOKEN="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"    
 HUGGINGFACE_REPO_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 DB_FAISS_PATH = "vectorstore/db_faiss"
 
@@ -490,25 +492,46 @@ st.markdown(get_sidebar_css(tab), unsafe_allow_html=True)
 # If BotGuru is selected, show its content first
 if tab == "TOMY":
     st.markdown("<span class='chatbot-name botguru-name'>Tomy</span>", unsafe_allow_html=True)
-    st.markdown("I'm a bot trained to answer based on the trusted information my creator provided — mainly right now from the Gale Encyclopedia of Medicine")
-    
-    def main():
-        
+    st.markdown("I'm a bot trained to answer based on the trusted information my creator provided — mainly right now from the **Gale Encyclopedia of Medicine**. You can also upload your own PDF!")
 
+    # Upload Option
+    uploaded_file = st.file_uploader("📄 Upload a PDF to chat with instead", type="pdf")
+
+    # Function to process PDF and create temporary vectorstore
+    def process_pdf(file):
+        with open("temp_uploaded.pdf", "wb") as f:
+            f.write(file.read())
+        loader = PyPDFLoader("temp_uploaded.pdf")
+        documents = loader.load()
+        text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        docs = text_splitter.split_documents(documents)
+        embedding_model = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+        db = TempFAISS.from_documents(docs, embedding_model)
+        return db
+
+    def main():
         if 'messages' not in st.session_state:
             st.session_state.messages = []
 
         for message in st.session_state.messages:
             st.chat_message(message['role']).markdown(message['content'])
 
-        prompt = st.chat_input("Ask your question here...")  # ✅ This was previously outside
+        prompt = st.chat_input("Ask your question here...")
 
         if prompt:
             st.chat_message("user").markdown(prompt)
             st.session_state.messages.append({'role': 'user', 'content': prompt})
 
+            # Use PDF if available, otherwise Gale
+            if uploaded_file:
+                vectorstore = process_pdf(uploaded_file)
+                st.success("Tomy is now answering based on your uploaded PDF.")
+            else:
+                vectorstore = get_vectorstore()
+                st.info("Tomy is answering based on the Gale Encyclopedia of Medicine.")
+
             CUSTOM_PROMPT_TEMPLATE = """
-            You're a helpful and friendly assistant.Your name is Tomy. Use the information provided in the context below to answer the user's question as clearly and kindly as possible.
+            You're a helpful and friendly assistant. Your name is Tomy. Use the information provided in the context below to answer the user's question as clearly and kindly as possible.
 
             If you're not sure about the answer, it's okay to say you don't know—please don't guess or add anything beyond what's given.
 
@@ -525,8 +548,6 @@ if tab == "TOMY":
             """
 
             try:
-                vectorstore = get_vectorstore()
-
                 qa_chain = RetrievalQA.from_chain_type(
                     llm=load_llm(HUGGINGFACE_REPO_ID),
                     chain_type="stuff",
@@ -535,26 +556,25 @@ if tab == "TOMY":
                     chain_type_kwargs={"prompt": set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)},
                 )
 
-                # Handle greetings separately
-                greetings = ["hi", "hello", "hey", "how are you", "how are you?", "good morning", "good evening"]
-                normalized_prompt = prompt.lower().strip()
-
-                if any(greet in normalized_prompt for greet in greetings):
+                # Friendly greetings shortcut
+                greetings = ["hi", "hello", "hey", "how are you", "good morning", "good evening"]
+                if any(greet in prompt.lower() for greet in greetings):
                     result = "Hello! 😊 How can I help you today?"
-                    st.chat_message("assistant").markdown(result)
-                    st.session_state.messages.append({'role': 'assistant', 'content': result})
                 else:
                     response = qa_chain.invoke({"query": prompt})
                     result = response["result"]
-                    st.chat_message("assistant").markdown(result)
-                    st.session_state.messages.append({'role': 'assistant', 'content': result})
 
+                st.chat_message("assistant").markdown(result)
+                st.session_state.messages.append({'role': 'assistant', 'content': result})
+
+                # Optional: show sources
+                if not any(greet in prompt.lower() for greet in greetings):
                     with st.expander("📚 Source Documents"):
                         for i, doc in enumerate(response["source_documents"], start=1):
                             st.markdown(f"**Source {i}:**\n{doc.page_content}")
 
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(f"Something went wrong: {str(e)}")
 
     if __name__ == "__main__":
         main()
