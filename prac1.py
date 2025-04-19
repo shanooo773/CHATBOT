@@ -292,7 +292,7 @@ section[data-testid="stSidebar"] input[type="radio"]:checked + label {
 
 # Load environment variables
 load_dotenv(find_dotenv())
-HF_TOKEN="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"    
+HF_TOKEN="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"    
 HUGGINGFACE_REPO_ID = "mistralai/Mistral-7B-Instruct-v0.3"
 DB_FAISS_PATH = "vectorstore/db_faiss"
 
