@@ -1,249 +1,142 @@
-# 🤖 CHATBOT - Multi-Purpose AI Assistant Platform
+# Retrieval-Augmented QA over Medical Reference Text
 
-A sophisticated chatbot application built with Python, featuring multiple specialized AI assistants powered by advanced language models and retrieval-augmented generation (RAG) technology.
+A RAG pipeline over *The Gale Encyclopedia of Medicine* (2nd ed., 759 pages)
+that answers questions with a source citation attached to every answer, and
+can be repointed at a user-uploaded PDF at query time. Built as an
+independent project; the retrieval side is evaluated quantitatively below,
+not just demoed.
 
-## 🌟 Features
+I'm looking for research opportunities in retrieval and applied NLP — this
+project, and the evaluation harness in particular, is meant to show how I
+approach that work: measure the retriever on its own terms before trusting
+what the LLM does with what it's given.
 
-### 🎯 Multiple Specialized Chatbots
-- **TOMY** - Main assistant trained on medical encyclopedia data with PDF upload capability
-- **CodeBot** - Programming and code debugging specialist
-- **ChatMate** - Casual, human-like conversationalist
-- **DocuBot** - Document summarization and rewriting expert
-- **IdeaSpark** - Creative ideas and brainstorming assistant
-- **TechBot** - Technical support and troubleshooting helper
+## How it works
 
-### 🚀 Advanced Capabilities
-- **RAG (Retrieval Augmented Generation)** - Combines document knowledge with LLM responses
-- **PDF Document Processing** - Upload and chat with your own PDF documents
-- **Vector Database Search** - FAISS-powered similarity search for relevant information
-- **Pre-trained Knowledge Base** - Built-in Gale Encyclopedia of Medicine
-- **Responsive Web Interface** - Beautiful Streamlit-based UI with custom styling
-- **Real-time Chat** - Interactive conversation with persistent message history
-
-## 🛠️ Technologies Used
-
-- **Python 3.12** - Core programming language
-- **Streamlit** - Web application framework
-- **LangChain** - LLM orchestration and RAG implementation
-- **HuggingFace Transformers** - Language models and embeddings
-- **FAISS** - Vector similarity search and storage
-- **PyPDF** - PDF document processing
-- **Sentence Transformers** - Text embeddings generation
-
-### 🤖 AI Models
-- **Mistral-7B-Instruct-v0.3** - Primary language model via HuggingFace
-- **all-MiniLM-L6-v2** - Sentence embedding model for document retrieval
-
-## 📋 Prerequisites
-
-- Python 3.12 or higher
-- HuggingFace API token (for model access)
-- Minimum 8GB RAM recommended
-- Internet connection for model downloads
-
-## 🚀 Installation
-
-### 1. Clone the Repository
-```bash
-git clone https://github.com/shanooo773/CHATBOT.git
-cd CHATBOT
+```
+PDF -> PyPDFLoader -> RecursiveCharacterTextSplitter (500 chars, 50 overlap)
+     -> all-MiniLM-L6-v2 embeddings -> FAISS index
+     -> similarity_search(question, k) -> Mistral-7B-Instruct-v0.3 (RetrievalQA, "stuff" chain)
 ```
 
-### 2. Install Dependencies
+- `memory.py` — builds the FAISS index from PDFs in `data/`.
+- `llm.py` — CLI query loop: retrieve top-k chunks, pass them to the LLM with
+  a prompt that refuses to answer outside the given context.
+- `prac1.py` / `web.py` — Streamlit interfaces, including a mode that accepts
+  a user-uploaded PDF and re-indexes against it instead of the encyclopedia.
+- `rag_eval.py` — retrieval evaluation harness (below).
+- `build_chunk_variants.py` / `rag_eval_compare.py` — build alternate FAISS
+  indices with different chunking and compare them on the same questions.
 
-**Option A: Using pip**
+## Evaluation
+
+`rag_eval.py` runs 51 hand-written questions against the actual FAISS index
+built by `memory.py` — no LLM call, no mocked retriever. Each question
+records the exact PDF page (`source_page`, 0-indexed) it was written from,
+and a retrieved chunk counts as relevant if it comes from that page —
+**not** if it contains a hand-picked phrase.
+
+That distinction matters and is worth stating explicitly: an earlier version
+of this harness judged relevance by whether a chunk *contained* a specific
+answer phrase. That ground truth is confounded for a chunking comparison —
+change the chunk boundaries and the same source text gets sliced
+differently, so whether a phrase survives intact inside one particular
+chunk depends on the very thing being varied. Page identity doesn't move
+when chunk size changes, so it's the criterion that isolates the retriever
+as the only variable.
+
+| k | Recall@k | Precision@k | Hit@1 | MRR |
+|---|----------|--------------|-------|-----|
+| 3 | 0.863 | 0.490 | 0.725 | 0.794 |
+| 5 | 0.863 | 0.392 | 0.725 | 0.794 |
+
+51 questions, real questions from real pages (spanning 47 distinct pages),
+not filler.
+
+- **No hybrid comparison yet.** These numbers are all dense-only (MiniLM).
+  The obvious next step is a dense+sparse hybrid retriever, run through the
+  same 51 questions, the way the ablation on the
+  [phonetic search project](../project_1/Phonetic-Similarity-Search-System)
+  does for its G2P front-end.
+
+### Chunk-boundary ablation — and why the first version of this result was wrong
+
+The original hypothesis: chunk-boundary misses were the dominant failure
+mode, so widening the chunks (and overlap) should raise recall.
+`build_chunk_variants.py` builds two alternate indices over the *same* PDF
+to test that, and `rag_eval_compare.py` runs the *same* 51 questions
+against all three — plus an exact McNemar's test on the paired hit/miss
+outcomes, since "recall went up" and "that's a real effect, not noise" are
+different questions, and 51 paired outcomes is actually enough to ask the
+second one.
+
+| Chunking | Recall@5 | Precision@5 | Hit@1 | MRR |
+|---|---|---|---|---|
+| 500 chars / 50 overlap (baseline) | 0.863 | 0.392 | **0.725** | **0.794** |
+| 1000 chars / 200 overlap | **0.922** | 0.380 | 0.647 | 0.761 |
+| NLTK sentence-aware, ~1000 chars | 0.902 | 0.361 | 0.667 | 0.761 |
+
+McNemar's test, baseline vs. 1000/200 (3 discordant pairs: baseline missed
+and wide hit on all 3, baseline never hit where wide missed): **p = 0.25,
+not significant at α = 0.05.** Baseline vs. sentence-aware (2 discordant
+pairs): **p = 0.50, not significant.**
+
+**This is a materially different result from an earlier pass of this
+ablation**, which used the answer-phrase ground truth described above and
+reported a 22-question Recall@5 jump from 0.64 to 0.77. That earlier number
+was real in the sense that it was computed, not invented — but it was
+measuring two things at once (the retriever, and how cleanly a fixed phrase
+happened to survive re-chunking), and 22 questions with only a handful of
+flips isn't enough to call the difference anything more than "went the
+right direction once." With the deconfounded ground truth and more than
+double the questions:
+
+- Recall@5 did move up for wider chunking (0.86 -> 0.92) — same direction
+  as before, which is mildly reassuring — but the gap rests on 3 discordant
+  questions out of 51, and McNemar's test says that's consistent with
+  noise.
+- **Hit@1 and MRR moved the other way** (0.73 -> 0.65 Hit@1 for
+  1000/200). Wider chunks bring in the right page more often but rank it
+  first *less* often, plausibly because a wider window pulls in more
+  competing, tangentially-related chunks from the same or nearby pages.
+  That's the opposite of what the "improved Recall@5" headline implies
+  about the system getting straightforwardly better.
+
+Net: wider chunks preserving more context is a well-founded expectation,
+and the data doesn't contradict it — but it doesn't clear the bar to state
+it as a demonstrated result, either. That's a real, useful distinction:
+*plausible* and *demonstrated* are different claims, and the gap between
+them is most of what separates a defensible research line from a
+misleading one. The honest version of this line, right now, is "wider
+chunking moved recall in the expected direction on 51 questions, but the
+effect isn't statistically distinguishable from noise, and precision-side
+metrics moved the other way" — not "improved Recall@5 by 21%."
+
+## Other interfaces
+
+The Streamlit app (`prac1.py`) also exposes non-RAG chat personas (CodeBot,
+ChatMate, DocuBot, IdeaSpark, TechBot) built on the same LLM call for
+general conversation, coding help, and document rewriting. They're not part
+of the evaluation above — TOMY (the encyclopedia bot) is the one actually
+being measured.
+
+## Setup
+
 ```bash
 pip install -r requirements.txt
+# .env: HF_TOKEN=your_huggingface_api_token
+python memory.py              # build the baseline (500/50) FAISS index from data/
+python rag_eval.py            # run the retrieval evaluation, 51 questions (no HF_TOKEN needed)
+python build_chunk_variants.py  # build the 1000/200 and sentence-aware indices
+python rag_eval_compare.py    # compare all three chunking strategies
+streamlit run prac1.py        # full app (needs HF_TOKEN for the LLM)
 ```
 
-**Option B: Using Pipenv**
-```bash
-pipenv install
-pipenv shell
-```
+`rag_eval.py` only needs the embedding model (local, via
+`sentence-transformers`) — it doesn't call the Hugging Face endpoint, so it
+runs without an API token.
 
-### 3. Environment Setup
-Create a `.env` file in the project root:
-```env
-HF_TOKEN=your_huggingface_api_token_here
-```
+## Stack
 
-Get your HuggingFace token from: https://huggingface.co/settings/tokens
-
-### 4. Initialize Vector Database
-Run the memory setup to process the included medical encyclopedia:
-```bash
-python memory.py
-```
-
-## 💻 Usage
-
-### Starting the Application
-
-**Main Web Interface:**
-```bash
-streamlit run prac1.py
-```
-
-**Alternative Interface:**
-```bash
-streamlit run web.py
-```
-
-**Command Line Interface:**
-```bash
-python llm.py
-```
-
-### 🌐 Web Interface Usage
-
-1. **Open your browser** to `http://localhost:8501`
-2. **Select a chatbot** from the sidebar:
-   - Toggle between TOMY and other specialized bots
-3. **Start chatting** by typing in the input field
-4. **Upload PDFs** (TOMY only) to chat with custom documents
-5. **View source documents** using the expandable section
-
-### 📄 PDF Upload Feature
-
-1. Select **TOMY** from the sidebar
-2. Click **"Upload a PDF to chat with instead"**
-3. Choose your PDF file
-4. Start asking questions about the uploaded document
-5. TOMY will answer based on your PDF content instead of the default encyclopedia
-
-## 📁 Project Structure
-
-```
-CHATBOT/
-├── README.md              # Project documentation
-├── requirements.txt       # Python dependencies
-├── Pipfile               # Pipenv configuration
-├── .env                  # Environment variables (create this)
-├── .gitignore           # Git ignore rules
-│
-├── web.py               # Alternative Streamlit interface
-├── prac1.py             # Main Streamlit application
-├── llm.py               # Core LLM functionality
-├── memory.py            # Document processing and vectorstore creation
-│
-├── data/                # Document storage
-│   └── The_GALE_ENCYCLOPEDIA_of_MEDICINE_SECOND.pdf
-│
-├── vectorstore/         # FAISS vector database
-│   └── db_faiss/       # Processed embeddings
-│
-└── temp_uploaded.pdf    # Temporary file for uploaded PDFs
-```
-
-## 🔧 Configuration
-
-### Model Configuration
-- **Primary LLM:** Mistral-7B-Instruct-v0.3
-- **Embedding Model:** sentence-transformers/all-MiniLM-L6-v2
-- **Temperature:** 0.9 (adjustable in code)
-- **Max Tokens:** 512
-- **Retrieval Documents:** 3 per query
-
-### FAISS Database
-- **Storage Path:** `vectorstore/db_faiss`
-- **Chunk Size:** 500 characters
-- **Chunk Overlap:** 50 characters
-
-## 🎨 Customization
-
-### Adding New Documents
-1. Place PDF files in the `data/` directory
-2. Run `python memory.py` to reprocess the vectorstore
-3. The new documents will be available for querying
-
-### Modifying Chatbot Behavior
-- Edit prompt templates in `llm.py` or `prac1.py`
-- Adjust model parameters (temperature, max_tokens)
-- Customize the retrieval system settings
-
-### UI Customization
-- Modify CSS styles in `prac1.py`
-- Add new chatbot personalities
-- Customize color schemes and layouts
-
-## 🚨 Troubleshooting
-
-### Common Issues
-
-**1. HuggingFace Token Error**
-```
-Error: Authentication failed
-```
-- Verify your HF_TOKEN in the `.env` file
-- Ensure the token has appropriate permissions
-
-**2. FAISS Database Not Found**
-```
-Error: vectorstore/db_faiss not found
-```
-- Run `python memory.py` to create the database
-- Ensure PDF files exist in the `data/` directory
-
-**3. Memory Issues**
-```
-CUDA out of memory / RAM error
-```
-- Use CPU-only mode by setting `device='cpu'`
-- Reduce chunk size or batch size
-- Close other applications to free memory
-
-**4. Streamlit Port Conflicts**
-```
-Port 8501 is already in use
-```
-- Use a different port: `streamlit run prac1.py --server.port 8502`
-- Kill existing Streamlit processes
-
-## 🔒 Security Notes
-
-- Keep your HuggingFace API token secure
-- Never commit `.env` files to version control
-- Be cautious when uploading sensitive PDFs
-- The application processes uploaded files locally
-
-## 🤝 Contributing
-
-1. **Fork the repository**
-2. **Create a feature branch:** `git checkout -b feature/new-feature`
-3. **Make your changes** and test thoroughly
-4. **Commit your changes:** `git commit -m 'Add new feature'`
-5. **Push to the branch:** `git push origin feature/new-feature`
-6. **Submit a pull request**
-
-### Development Guidelines
-- Follow PEP 8 Python style guidelines
-- Add docstrings to new functions
-- Test changes with different PDF types
-- Update documentation for new features
-
-## 📜 License
-
-This project is open source. Please ensure compliance with:
-- HuggingFace model licenses
-- Third-party library licenses
-- PDF content usage rights
-
-## 🙏 Acknowledgments
-
-- **HuggingFace** for providing the language models
-- **LangChain** for the RAG framework
-- **Streamlit** for the web interface
-- **Meta AI** for FAISS vector search
-- **Gale Encyclopedia** for the medical knowledge base
-
-## 📞 Support
-
-For questions, issues, or contributions:
-- Create an issue on GitHub
-- Check the troubleshooting section above
-- Review the documentation and code comments
-
----
-
-**Happy Chatting! 🎉**
+Python · LangChain · FAISS · Hugging Face (`all-MiniLM-L6-v2`,
+`Mistral-7B-Instruct-v0.3`) · Streamlit · PyPDF

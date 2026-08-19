@@ -4,3 +4,6 @@ __pycache__/
 *.log
 .venv/
 .env
+
+# Local vector stores
+vectorstore/
